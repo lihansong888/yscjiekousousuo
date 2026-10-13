@@ -2,37 +2,47 @@ name: 影视仓接口每日采集
 
 on:
   schedule:
-    
+    # 每天北京时间上午10点运行
     - cron: "0 2 * * *"
 
-  
+  # 支持手动运行
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: tvbox-config-collector
+  cancel-in-progress: false
 
 jobs:
   collect:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 获取源码
+      - name: 获取仓库源码
         uses: actions/checkout@v4
 
-      - name: 配置 Python
+      - name: 配置 Python 环境
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: 运行采集程序
+      - name: 运行接口采集程序
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python collector.py
+        run: python worker/collector.py
 
-      - name: 保存采集结果
+      - name: 提交采集结果
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git add 接口列表.txt 接口检测结果.txt
-          git diff --cached --quiet || git commit -m "每日更新影视仓配置接口"
-          git push
+
+          if git diff --cached --quiet; then
+            echo "采集结果没有变化，无需提交"
+          else
+            git commit -m "每日更新影视仓配置接口"
+            git push
+          fi
