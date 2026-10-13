@@ -6,76 +6,101 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
+# ==================== 基本配置 ====================
+
 API = "https://api.github.com"
+TOKEN = os.environ.get("GH_TOKEN", "")
+
 HEADERS = {
     "Accept": "application/vnd.github+json",
     "User-Agent": "TVBox-Config-Collector"
 }
 
-TOKEN = os.environ.get("GH_TOKEN", "")
 if TOKEN:
     HEADERS["Authorization"] = f"Bearer {TOKEN}"
 
-OUTPUT = "接口列表.txt"
-CHECK_OUTPUT = "接口检测结果.txt"
+# 获取仓库根目录
+ROOT_DIR = os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))
+)
 
-# 搜索公开的影视仓、TVBox 配置项目
+# 结果文件保存到仓库根目录
+OUTPUT = os.path.join(ROOT_DIR, "接口列表.txt")
+CHECK_OUTPUT = os.path.join(ROOT_DIR, "接口检测结果.txt")
+
+TIMEOUT = 15
+MAX_REPOS_PER_QUERY = 30
+MAX_JSON_FILES_PER_REPO = 40
+
 SEARCH_TERMS = [
     "影视仓",
     "TVBox",
-    "TVBox 配置",
+    "TVBox配置",
+    "TVBox接口",
     "tvbox config",
     "catvod",
-    "影视接口"
+    "影视接口",
+    "tvbox.json",
+    "drpy",
 ]
 
-# 识别影视仓配置中常见的字段
 CONFIG_KEYS = {
-    "sites", "lives", "parses", "spider",
-    "rules", "doh", "wallpaper", "ijk",
-    "drives", "api", "urls"
+    "sites",
+    "lives",
+    "parses",
+    "spider",
+    "rules",
+    "doh",
+    "wallpaper",
+    "ijk",
+    "drives",
+    "api",
+    "urls",
 }
 
-TIMEOUT = 12
-MAX_REPOS_PER_QUERY = 20
-MAX_JSON_FILES_PER_REPO = 30
 
+# ==================== 网络请求 ====================
 
 def request(url, timeout=TIMEOUT):
-    """获取网页内容。"""
     try:
         req = urllib.request.Request(url, headers=HEADERS)
+
         with urllib.request.urlopen(req, timeout=timeout) as response:
             return response.read()
+
     except Exception as exc:
         print(f"[请求失败] {url}：{exc}")
         return None
 
 
-def load_json(data):
-    """解析 JSON。"""
-    if not data:
+def load_json(content):
+    if not content:
         return None
 
     try:
-        return json.loads(data.decode("utf-8-sig"))
+        return json.loads(content.decode("utf-8-sig"))
     except Exception:
         return None
 
 
+# ==================== 配置识别 ====================
+
 def is_tvbox_config(data):
-    """判断 JSON 是否具有影视仓配置特征。"""
     if not isinstance(data, dict):
         return False
 
     keys = {str(key).lower() for key in data.keys()}
 
-    # 至少包含一个常见配置字段
     if not keys.intersection(CONFIG_KEYS):
         return False
 
-    # 排除明显不是影视仓配置的普通 JSON
-    for key in ("sites", "lives", "parses", "spider", "rules"):
+    for key in (
+        "sites",
+        "lives",
+        "parses",
+        "spider",
+        "rules",
+    ):
         value = data.get(key)
 
         if isinstance(value, (list, dict)) and value:
@@ -84,26 +109,31 @@ def is_tvbox_config(data):
     return False
 
 
+# ==================== GitHub 搜索 ====================
+
 def github_search_repositories(keyword):
-    """通过 GitHub 仓库搜索 API 查找公开项目。"""
     query = urllib.parse.urlencode({
         "q": keyword + " in:name,description,readme",
         "sort": "updated",
         "order": "desc",
-        "per_page": MAX_REPOS_PER_QUERY
+        "per_page": MAX_REPOS_PER_QUERY,
     })
 
     url = f"{API}/search/repositories?{query}"
+
     data = load_json(request(url))
 
     if not isinstance(data, dict):
+        return []
+
+    if "message" in data:
+        print("[GitHub API]", data["message"])
         return []
 
     return data.get("items", [])
 
 
 def get_repo_json_files(repo):
-    """获取仓库默认分支中的 JSON 文件。"""
     owner = repo.get("owner", {}).get("login")
     name = repo.get("name")
     branch = repo.get("default_branch")
@@ -111,10 +141,11 @@ def get_repo_json_files(repo):
     if not owner or not name or not branch:
         return []
 
-    encoded_branch = urllib.parse.quote(branch, safe="")
+    branch_encoded = urllib.parse.quote(branch, safe="")
+
     url = (
         f"{API}/repos/{owner}/{name}"
-        f"/git/trees/{encoded_branch}?recursive=1"
+        f"/git/trees/{branch_encoded}?recursive=1"
     )
 
     data = load_json(request(url))
@@ -123,7 +154,7 @@ def get_repo_json_files(repo):
         return []
 
     if data.get("truncated"):
-        print(f"[提示] 仓库文件树被截断：{owner}/{name}")
+        print(f"[提示] 文件树不完整：{owner}/{name}")
 
     files = []
 
@@ -137,14 +168,14 @@ def get_repo_json_files(repo):
         if not lower.endswith(".json"):
             continue
 
-        # 排除依赖、缓存和无关目录
-        if any(part in lower for part in (
+        excluded = (
             "node_modules/",
             "vendor/",
             ".git/",
-            "package-lock.json",
-            "composer.json"
-        )):
+            "__pycache__/",
+        )
+
+        if any(part in lower for part in excluded):
             continue
 
         files.append(path)
@@ -155,11 +186,14 @@ def get_repo_json_files(repo):
     return files
 
 
-def raw_url(repo, path):
-    """生成 GitHub 原始文件地址。"""
+def make_raw_url(repo, path):
     owner = repo["owner"]["login"]
     name = repo["name"]
-    branch = urllib.parse.quote(repo["default_branch"], safe="")
+
+    branch = urllib.parse.quote(
+        repo["default_branch"],
+        safe=""
+    )
 
     encoded_path = "/".join(
         urllib.parse.quote(part, safe="")
@@ -167,20 +201,23 @@ def raw_url(repo, path):
     )
 
     return (
-        f"https://raw.githubusercontent.com/"
+        "https://raw.githubusercontent.com/"
         f"{owner}/{name}/{branch}/{encoded_path}"
     )
 
 
+# ==================== 搜索配置 ====================
+
 def collect_candidates():
-    """搜索公开仓库并筛选配置文件。"""
     candidates = set()
     seen_repos = set()
 
     for keyword in SEARCH_TERMS:
-        print(f"\n[搜索] {keyword}")
+        print(f"\n[搜索关键词] {keyword}")
 
         repos = github_search_repositories(keyword)
+
+        print(f"[搜索结果] {len(repos)} 个仓库")
 
         for repo in repos:
             full_name = repo.get("full_name", "")
@@ -189,46 +226,40 @@ def collect_candidates():
                 continue
 
             seen_repos.add(full_name)
-            print(f"[仓库] {full_name}")
 
-            files = get_repo_json_files(repo)
+            print(f"\n[仓库] {full_name}")
 
-            for path in files:
-                url = raw_url(repo, path)
+            for path in get_repo_json_files(repo):
+                url = make_raw_url(repo, path)
 
-                # 只接受实际可访问且符合配置结构的 JSON
                 content = request(url)
-                obj = load_json(content)
+                data = load_json(content)
 
-                if is_tvbox_config(obj):
+                if is_tvbox_config(data):
                     candidates.add(url)
                     print(f"[发现配置] {url}")
 
-                # 避免过快请求 GitHub
-                time.sleep(0.15)
+                time.sleep(0.2)
 
     return candidates
 
 
-def check_config(url):
-    """检查配置地址是否可访问且包含有效配置结构。"""
-    content = request(url)
-    obj = load_json(content)
-
-    return is_tvbox_config(obj)
-
+# ==================== 历史记录 ====================
 
 def read_old_urls(filename):
-    """读取以前保存的地址，供下次运行继续检查。"""
     if not os.path.exists(filename):
         return set()
 
+    urls = set()
+
     with open(filename, "r", encoding="utf-8") as file:
-        return {
-            line.strip()
-            for line in file
-            if line.strip().startswith(("https://", "http://"))
-        }
+        for line in file:
+            url = line.strip()
+
+            if url.startswith(("https://", "http://")):
+                urls.add(url)
+
+    return urls
 
 
 def write_lines(filename, urls):
@@ -237,48 +268,72 @@ def write_lines(filename, urls):
             file.write(url + "\n")
 
 
+# ==================== 接口检测 ====================
+
+def check_config(url):
+    content = request(url)
+    data = load_json(content)
+
+    return is_tvbox_config(data)
+
+
+def check_all(urls):
+    valid_urls = set()
+    total = len(urls)
+
+    for index, url in enumerate(sorted(urls), start=1):
+        print(f"\n[检测 {index}/{total}] {url}")
+
+        if check_config(url):
+            valid_urls.add(url)
+            print("[结果] 可访问，JSON 配置结构有效")
+        else:
+            print("[结果] 无法访问或配置结构不符合要求")
+
+        time.sleep(0.2)
+
+    return valid_urls
+
+
+# ==================== 主程序 ====================
+
 def main():
     print("=" * 50)
     print("影视仓配置接口自动采集器")
     print("运行时间：", datetime.now(timezone.utc).isoformat())
+    print("仓库根目录：", ROOT_DIR)
     print("=" * 50)
 
-    # 搜索新配置
+    # 读取历史记录
+    old_urls = read_old_urls(OUTPUT)
+
+    print(f"[历史记录] {len(old_urls)} 个地址")
+
+    # 搜索公开仓库
     new_urls = collect_candidates()
 
-    # 合并历史地址，避免每次运行丢失以前的结果
-    old_urls = read_old_urls(OUTPUT)
+    # 合并历史地址
     all_urls = old_urls | new_urls
 
-    print(f"\n新发现：{len(new_urls)} 个")
-    print(f"历史地址：{len(old_urls)} 个")
-    print(f"待检测总数：{len(all_urls)} 个")
+    print("\n" + "=" * 50)
+    print(f"本次发现：{len(new_urls)} 个")
+    print(f"累计地址：{len(all_urls)} 个")
+    print("=" * 50)
 
-    # 检查全部地址
-    valid_urls = set()
+    # 检测所有历史及新发现地址
+    valid_urls = check_all(all_urls)
 
-    for index, url in enumerate(sorted(all_urls), start=1):
-        print(f"[检测 {index}/{len(all_urls)}] {url}")
-
-        if check_config(url):
-            valid_urls.add(url)
-            print("[有效配置]")
-        else:
-            print("[无法验证或配置格式不符]")
-
-        time.sleep(0.2)
-
-    # 接口列表保留所有已发现地址
+    # 保存全部发现的地址
     write_lines(OUTPUT, all_urls)
 
-    # 检测结果只保存可访问且符合配置结构的地址
+    # 保存检测通过的地址
     write_lines(CHECK_OUTPUT, valid_urls)
 
-    print("\n采集完成")
-    print(f"累计地址：{len(all_urls)} 个")
-    print(f"有效配置：{len(valid_urls)} 个")
-    print(f"已生成：{OUTPUT}")
-    print(f"已生成：{CHECK_OUTPUT}")
+    print("\n========== 运行完成 ==========")
+    print(f"接口列表：{OUTPUT}")
+    print(f"检测结果：{CHECK_OUTPUT}")
+    print(f"累计地址：{len(all_urls)}")
+    print(f"检测通过：{len(valid_urls)}")
 
 
 if __name__ == "__main__":
